@@ -122,3 +122,313 @@ aws-ssh() {
     aws ssm start-session \
         --target "$selected_instance"
 }
+
+aws-scp-ssm() {
+    if [ $# -lt 2 ]; then
+        echo "Usage: aws-scp-ssm <source> <destination>"
+        echo ""
+        echo "Examples:"
+        echo "  aws-scp ./config.json /opt/app/config/         # Upload relative local file"
+        echo "  aws-scp /home/user/file.txt /remote/path/      # Upload absolute local file"
+        echo "  aws-scp /var/log/app.log ./logs/               # Download to relative local path"
+        echo "  aws-scp /remote/file.txt /home/user/           # Download to absolute local path"
+        echo ""
+        echo "Notes:"
+        echo "  - Local paths can be relative or absolute"
+        echo "  - Remote paths must be absolute (start with /)"
+        echo "  - Transfer direction auto-detected based on path types"
+        return 1
+    fi
+
+    local source="$1"
+    local destination="$2"
+
+    local selected_instance=$(aws-select-instance)
+    if [ $? -ne 0 ] || [ -z "$selected_instance" ]; then
+        return 1
+    fi
+
+    echo "Selected instance: $selected_instance"
+    echo ""
+
+    # Auto-detect transfer direction based on which path is absolute (remote)
+    local is_upload=false
+    local local_path=""
+    local remote_path=""
+
+    if [[ "$source" == /* ]] && [[ "$destination" != /* ]]; then
+        # Source is absolute (remote), destination is local - DOWNLOAD
+        is_upload=false
+        remote_path="$source"
+        local_path="$destination"
+    elif [[ "$source" != /* ]] && [[ "$destination" == /* ]]; then
+        # Source is local, destination is absolute (remote) - UPLOAD
+        is_upload=true
+        local_path="$source"
+        remote_path="$destination"
+
+        # If remote path ends with /, append filename
+        if [[ "$remote_path" == */ ]]; then
+            local filename=$(basename "$local_path")
+            remote_path="${remote_path}${filename}"
+        fi
+    elif [[ "$source" == /* ]] && [[ "$destination" == /* ]]; then
+        # Both absolute - ambiguous, ask user
+        echo "Both paths are absolute. Specify transfer direction:"
+        echo "1) Upload: $source → instance:$destination"
+        echo "2) Download: instance:$source → $destination"
+        echo -n "Select direction (1-2): " >&2
+        read direction </dev/tty
+
+        case $direction in
+            1)
+                is_upload=true
+                local_path="$source"
+                remote_path="$destination"
+                # If remote path ends with /, append filename
+                if [[ "$remote_path" == */ ]]; then
+                    local filename=$(basename "$local_path")
+                    remote_path="${remote_path}${filename}"
+                fi
+                ;;
+            2)
+                is_upload=false
+                remote_path="$source"
+                local_path="$destination"
+                ;;
+            *)
+                echo "Invalid selection."
+                return 1
+                ;;
+        esac
+    else
+        # Both relative - error
+        echo "Error: At least one path must be absolute to identify remote location."
+        echo "Remote paths must start with '/'"
+        return 1
+    fi
+
+    # Convert relative local path to absolute if needed
+    if [[ "$local_path" != /* ]]; then
+        local_path="$(pwd)/$local_path"
+    fi
+
+    if [ "$is_upload" = true ]; then
+        echo "Uploading $local_path to $selected_instance:$remote_path"
+
+        # Encode file content as base64 to handle binary files and avoid shell issues
+        local encoded_content=$(base64 -i "$local_path")
+
+        # Upload via SSM send-command with smaller chunks for large files
+        if [ ${#encoded_content} -gt 30000 ]; then
+            echo "File is large ($(wc -c < "$local_path") bytes), this may take a moment..."
+        fi
+
+        # Create the file and set proper permissions
+        local command_id=$(aws ssm send-command \
+            --instance-ids "$selected_instance" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[\"echo '$encoded_content' | base64 -d > '$remote_path' && echo 'File written successfully' || echo 'Failed to write file'\"]" \
+            --query 'Command.CommandId' \
+            --output text)
+
+        if [ -n "$command_id" ]; then
+            echo "Waiting for upload to complete..."
+
+            # Wait with timeout
+            if aws ssm wait command-executed \
+                --command-id "$command_id" \
+                --instance-id "$selected_instance" 2>/dev/null; then
+
+                # Check command result
+                local cmd_status=$(aws ssm get-command-invocation \
+                    --command-id "$command_id" \
+                    --instance-id "$selected_instance" \
+                    --query 'Status' \
+                    --output text)
+
+                local cmd_output=$(aws ssm get-command-invocation \
+                    --command-id "$command_id" \
+                    --instance-id "$selected_instance" \
+                    --query 'StandardOutputContent' \
+                    --output text)
+
+                local cmd_error=$(aws ssm get-command-invocation \
+                    --command-id "$command_id" \
+                    --instance-id "$selected_instance" \
+                    --query 'StandardErrorContent' \
+                    --output text)
+
+                if [ "$cmd_status" = "Success" ] && [[ "$cmd_output" == *"File written successfully"* ]]; then
+                    echo "Upload completed successfully."
+                else
+                    echo "Upload failed. Status: $cmd_status"
+                    echo "Output: $cmd_output"
+                    echo "Error: $cmd_error"
+                    return 1
+                fi
+            else
+                echo "Upload command timed out or failed to execute."
+                return 1
+            fi
+        else
+            echo "Failed to initiate upload command."
+            return 1
+        fi
+
+    else
+        echo "Downloading $selected_instance:$remote_path to $local_path"
+
+        # Download via SSM send-command
+        local command_id=$(aws ssm send-command \
+            --instance-ids "$selected_instance" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[\"base64 '$remote_path'\"]" \
+            --query 'Command.CommandId' \
+            --output text)
+
+        if [ -n "$command_id" ]; then
+            echo "Waiting for download to complete..."
+            aws ssm wait command-executed \
+                --command-id "$command_id" \
+                --instance-id "$selected_instance"
+
+            # Check command status and get output
+            local dl_status=$(aws ssm get-command-invocation \
+                --command-id "$command_id" \
+                --instance-id "$selected_instance" \
+                --query 'Status' \
+                --output text)
+
+            if [ "$dl_status" = "Success" ]; then
+                # Get the base64 encoded file content and decode it
+                aws ssm get-command-invocation \
+                    --command-id "$command_id" \
+                    --instance-id "$selected_instance" \
+                    --query 'StandardOutputContent' \
+                    --output text | base64 -d > "$local_path"
+
+                echo "Download completed successfully."
+            else
+                echo "Download failed. Status: $dl_status"
+                # Show error details
+                aws ssm get-command-invocation \
+                    --command-id "$command_id" \
+                    --instance-id "$selected_instance" \
+                    --query 'StandardErrorContent' \
+                    --output text
+                return 1
+            fi
+        else
+            echo "Failed to initiate download command."
+            return 1
+        fi
+    fi
+}
+
+aws-scp() {
+    if [ $# -lt 2 ]; then
+        echo "Usage: aws-scp <source> <destination>"
+        echo ""
+        echo "Examples:"
+        echo "  aws-scp ./config.json /opt/app/config/         # Upload to instance"
+        echo "  aws-scp /var/log/app.log ./logs/               # Download from instance"
+        echo ""
+        echo "Notes:"
+        echo "  - Uses SSH over Session Manager (faster than aws-scp-ssm)"
+        echo "  - Requires SSH key configured on the instance"
+        echo "  - Local paths can be relative or absolute"
+        echo "  - Remote paths must be absolute (start with /)"
+        return 1
+    fi
+
+    local source="$1"
+    local destination="$2"
+    local username="${3:-ubuntu}"  # Default to ubuntu, can override
+
+    local selected_instance=$(aws-select-instance)
+    if [ $? -ne 0 ] || [ -z "$selected_instance" ]; then
+        return 1
+    fi
+
+    echo "Selected instance: $selected_instance"
+    echo "Using SSH user: $username"
+    echo ""
+
+    # Auto-detect transfer direction and fix paths
+    local is_upload=false
+    local local_path=""
+    local remote_path=""
+
+    if [[ "$source" == /* ]] && [[ "$destination" != /* ]]; then
+        # Download: remote → local
+        is_upload=false
+        remote_path="$source"
+        local_path="$destination"
+    elif [[ "$source" != /* ]] && [[ "$destination" == /* ]]; then
+        # Upload: local → remote
+        is_upload=true
+        local_path="$source"
+        remote_path="$destination"
+
+        # If remote path ends with /, append filename
+        if [[ "$remote_path" == */ ]]; then
+            local filename=$(basename "$local_path")
+            remote_path="${remote_path}${filename}"
+        fi
+    else
+        echo "Error: One path must be absolute (remote) and one relative/absolute (local)"
+        return 1
+    fi
+
+    # Convert relative local path to absolute
+    if [[ "$local_path" != /* ]]; then
+        local_path="$(pwd)/$local_path"
+    fi
+
+    # Setup SSH config for this session
+    local ssh_config_backup=""
+    if [ -f ~/.ssh/config ]; then
+        ssh_config_backup=$(mktemp)
+        cp ~/.ssh/config "$ssh_config_backup"
+    fi
+
+    # Add temporary SSH config for Session Manager proxy
+    cat >> ~/.ssh/config << EOF
+
+# Temporary AWS Session Manager proxy config
+Host i-* mi-*
+    ProxyCommand sh -c "aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters 'portNumber=%p'"
+    User $username
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+EOF
+
+    echo "Setting up SSH proxy via Session Manager..."
+
+    # Perform the transfer
+    if [ "$is_upload" = true ]; then
+        echo "Uploading $local_path to $selected_instance:$remote_path"
+        scp "$local_path" "$selected_instance:$remote_path"
+    else
+        echo "Downloading $selected_instance:$remote_path to $local_path"
+        scp "$selected_instance:$remote_path" "$local_path"
+    fi
+
+    local scp_result=$?
+
+    # Restore original SSH config
+    if [ -n "$ssh_config_backup" ]; then
+        mv "$ssh_config_backup" ~/.ssh/config
+    else
+        # Remove the temporary config we added
+        sed -i '/# Temporary AWS Session Manager proxy config/,$d' ~/.ssh/config
+    fi
+
+    if [ $scp_result -eq 0 ]; then
+        echo "Transfer completed successfully."
+    else
+        echo "Transfer failed."
+        return $scp_result
+    fi
+}

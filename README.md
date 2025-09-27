@@ -29,6 +29,8 @@ A collection of bash functions for managing AWS resources, including EC2 instanc
 | `aws-ec2-list` | List all EC2 instances with details |
 | `aws-rds-info` | Retrieve RDS credentials from Secrets Manager |
 | `aws-ssh` | SSH into EC2 instance via Session Manager |
+| `aws-scp` | Transfer files to/from EC2 instances via SSH over Session Manager |
+| `aws-scp-ssm` | Transfer files to/from EC2 instances via SSM commands (slower) |
 | `aws-db-fwdport` | Port forward to RDS through EC2 bastion |
 
 ---
@@ -167,6 +169,130 @@ Starting SSH session via AWS Session Manager...
 - Works through private networks (no public IP required)
 - Uses IAM permissions instead of SSH keys
 - Auditable through CloudTrail
+
+---
+
+### `aws-scp`
+
+Transfer files to and from EC2 instances using SSH over Session Manager (recommended method).
+
+**Prerequisites:**
+Before using this function, you need to set up SSH key access on your EC2 instances:
+
+1. **Connect to instance via Session Manager:**
+   ```bash
+   aws-ssh  # Use our helper to connect
+   ```
+
+2. **Switch to the ubuntu/ec2-user account:**
+   ```bash
+   sudo su - ubuntu  # or ec2-user depending on AMI
+   ```
+
+3. **Add your SSH public key:**
+   ```bash
+   mkdir -p ~/.ssh
+   echo "your-ssh-public-key-here" >> ~/.ssh/authorized_keys
+   chmod 600 ~/.ssh/authorized_keys
+   chmod 700 ~/.ssh
+   ```
+
+4. **Optional: Configure your local SSH config (permanent setup):**
+   Add this to your `~/.ssh/config`:
+   ```
+   Host i-* mi-*
+       ProxyCommand sh -c "aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters 'portNumber=%p'"
+       User ubuntu
+       StrictHostKeyChecking no
+       UserKnownHostsFile /dev/null
+   ```
+
+**Usage:**
+```bash
+aws-scp <source> <destination> [username]
+```
+
+**Parameters:**
+- `source`: Local or remote file path (relative/absolute for local, absolute for remote)
+- `destination`: Local or remote file path (relative/absolute for local, absolute for remote)
+- `username`: SSH username (optional, defaults to `ubuntu`)
+
+**Examples:**
+
+**Upload files:**
+```bash
+aws-scp ./config.json /opt/app/config/         # Upload relative local file
+aws-scp /home/user/file.txt /home/ubuntu/      # Upload absolute local file
+aws-scp ./archive.tar.gz /tmp/                 # Upload to /tmp/archive.tar.gz
+```
+
+**Download files:**
+```bash
+aws-scp /var/log/app.log ./logs/               # Download to relative local path
+aws-scp /etc/nginx/nginx.conf /home/user/      # Download to absolute local path
+```
+
+**Custom username:**
+```bash
+aws-scp ./file.txt /home/ec2-user/ ec2-user    # Use ec2-user instead of ubuntu
+```
+
+**Sample Output:**
+```bash
+$ aws-scp ./deploy.sh /home/ubuntu/
+Fetching running EC2 instances...
+Available running EC2 instances:
+=====================================
+1) i-0123456789abcdef0 - my-app-server - Private: 10.0.10.46
+
+Select instance number (1-1): 1
+Selected instance: i-0123456789abcdef0
+Using SSH user: ubuntu
+
+Setting up SSH proxy via Session Manager...
+Uploading /Users/user/deploy.sh to i-0123456789abcdef0:/home/ubuntu/deploy.sh
+deploy.sh                    100%  1247    15.2KB/s   00:00
+Transfer completed successfully.
+```
+
+**Benefits:**
+- **Fast transfers** - uses native SCP over SSH tunnel
+- **Supports large files** - no encoding overhead
+- **Works with directories** - `scp -r` functionality
+- **Progress indication** - shows transfer speed and progress
+- **Auto-cleanup** - temporary SSH config is cleaned up automatically
+
+**Tips:**
+- For large files, compress first: `tar czf archive.tar.gz folder/ && aws-scp archive.tar.gz /tmp/`
+- Transfer is slow over Session Manager, so compress when possible
+- SSH key setup is one-time per instance
+
+---
+
+### `aws-scp-ssm`
+
+Transfer files to and from EC2 instances using SSM commands (fallback method when SSH keys are not available).
+
+**Usage:**
+```bash
+aws-scp-ssm <source> <destination>
+```
+
+**Parameters:**
+- `source`: Local or remote file path (relative/absolute for local, absolute for remote)
+- `destination`: Local or remote file path (relative/absolute for local, absolute for remote)
+
+**Examples:**
+```bash
+aws-scp-ssm ./config.json /opt/app/config/     # Upload relative local file
+aws-scp-ssm /var/log/app.log ./logs/           # Download to relative local path
+```
+
+**Notes:**
+- **Slower than aws-scp** - uses base64 encoding through SSM commands
+- **No SSH keys required** - works with just SSM permissions
+- **Limited file size** - may fail with very large files due to SSM command limits
+- **Use aws-scp instead** when SSH keys are available
 
 ---
 
