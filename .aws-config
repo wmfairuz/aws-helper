@@ -1,0 +1,106 @@
+export AWS_DEFAULT_REGION=ap-southeast-5
+export AWS_REGION=ap-southeast-5
+
+aws-profile() {
+    if [ -z "$1" ]; then
+        echo "Current profile: ${AWS_PROFILE:-default}"
+        echo "Available profiles:"
+        aws configure list-profiles
+        return
+    fi
+    
+    export AWS_PROFILE=$1
+    echo "Switched to AWS profile: $AWS_PROFILE"
+}
+
+aws-rds-info(){
+    aws secretsmanager get-secret-value \
+        --secret-id "myapp/database/password" \
+        --query SecretString --output text | jq .
+}
+
+aws-ec2-list() {
+    aws ec2 describe-instances \
+        --query 'Reservations[*].Instances[*].[InstanceId,Tags[?Key==`Name`].Value|[0],State.Name]' \
+        --output table
+}
+
+aws-select-instance() {
+    local filter_state="${1:-running}"
+
+    echo "Fetching $filter_state EC2 instances..." >&2
+
+    # Get instances with their details
+    local instances=$(aws ec2 describe-instances \
+        --filters "Name=instance-state-name,Values=$filter_state" \
+        --query 'Reservations[*].Instances[*].[InstanceId,Tags[?Key==`Name`].Value|[0],PrivateIpAddress,PublicIpAddress]' \
+        --output text | grep -v "None\tNone\tNone")
+
+    if [ -z "$instances" ]; then
+        echo "No $filter_state EC2 instances found." >&2
+        return 1
+    fi
+
+    echo "Available $filter_state EC2 instances:" >&2
+    echo "=====================================" >&2
+
+    local counter=1
+    local instance_ids=()
+
+    while IFS=$'\t' read -r instance_id name private_ip public_ip; do
+        local display_name="${name:-"(no name)"}"
+        local ip_info="Private: $private_ip"
+        if [ "$public_ip" != "None" ] && [ -n "$public_ip" ]; then
+            ip_info="$ip_info, Public: $public_ip"
+        fi
+        echo "$counter) $instance_id - $display_name - $ip_info" >&2
+        instance_ids+=("$instance_id")
+        ((counter++))
+    done <<< "$instances"
+
+    echo >&2
+    printf "Select instance number (1-$((counter-1))): " >&2
+    read selection </dev/tty
+
+    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt $((counter-1)) ]; then
+        echo "Invalid selection." >&2
+        return 1
+    fi
+
+    echo "${instance_ids[$selection]}"
+}
+
+aws-db-fwdport() {
+    local rds_host="${1:-your-rds-endpoint}"
+    local remote_port="${2:-3306}"
+    local local_port="${3:-33060}"
+
+    local selected_instance=$(aws-select-instance)
+    if [ $? -ne 0 ] || [ -z "$selected_instance" ]; then
+        return 1
+    fi
+
+    echo "Starting port forwarding session..."
+    echo "Instance: $selected_instance"
+    echo "RDS Host: $rds_host"
+    echo "Remote Port: $remote_port -> Local Port: $local_port"
+    echo
+
+    aws ssm start-session \
+        --target "$selected_instance" \
+        --document-name AWS-StartPortForwardingSessionToRemoteHost \
+        --parameters "{\"host\":[\"$rds_host\"],\"portNumber\":[\"$remote_port\"],\"localPortNumber\":[\"$local_port\"]}"
+}
+
+aws-ssh() {
+    local selected_instance=$(aws-select-instance)
+    if [ $? -ne 0 ] || [ -z "$selected_instance" ]; then
+        return 1
+    fi
+
+    echo "Connecting to instance: $selected_instance"
+    echo "Starting SSH session via AWS Session Manager..."
+
+    aws ssm start-session \
+        --target "$selected_instance"
+}
