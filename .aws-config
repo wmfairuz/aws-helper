@@ -71,9 +71,27 @@ aws-select-instance() {
 }
 
 aws-db-fwdport() {
-    local rds_host="${1:-your-rds-endpoint}"
-    local remote_port="${2:-3306}"
-    local local_port="${3:-33060}"
+    local local_port="${1:-33060}"
+    local rds_host="$2"
+    local remote_port="3306"
+
+    # If no RDS host provided, fetch from Secrets Manager
+    if [ -z "$rds_host" ]; then
+        echo "Fetching RDS endpoint from Secrets Manager..."
+        rds_host=$(aws secretsmanager get-secret-value \
+            --secret-id "myapp/database/password" \
+            --query SecretString --output text | jq -r '.host // .endpoint // empty')
+
+        if [ -z "$rds_host" ] || [ "$rds_host" = "null" ]; then
+            echo "Error: Could not fetch RDS endpoint from Secrets Manager."
+            echo "Please provide RDS host manually: aws-db-fwdport [local-port] <rds-endpoint>"
+            return 1
+        fi
+
+        # Remove port if present (e.g., hostname:3306 -> hostname)
+        rds_host="${rds_host%:*}"
+        echo "Found RDS endpoint: $rds_host"
+    fi
 
     local selected_instance=$(aws-select-instance)
     if [ $? -ne 0 ] || [ -z "$selected_instance" ]; then
