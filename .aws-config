@@ -1,6 +1,37 @@
 export AWS_DEFAULT_REGION=ap-southeast-5
 export AWS_REGION=ap-southeast-5
 
+aws-help() {
+    echo "AWS Helper Functions"
+    echo "==================="
+    echo
+    echo "Profile Management:"
+    echo "  aws-profile [name]        Switch AWS profiles or list available profiles"
+    echo
+    echo "EC2 Operations:"
+    echo "  aws-ec2-list             List all EC2 instances with details"
+    echo "  aws-select-instance      Interactively select a running EC2 instance"
+    echo "  aws-ssh                  SSH into EC2 instance via Session Manager"
+    echo
+    echo "File Transfer:"
+    echo "  aws-scp <src> <dest>     Transfer files via SSH over Session Manager (fast)"
+    echo "  aws-scp-ssm <src> <dest> Transfer files via SSM commands (fallback)"
+    echo
+    echo "Database Operations:"
+    echo "  aws-rds-info             Retrieve RDS credentials from Secrets Manager"
+    echo "  aws-db-fwdport [port]    Port forward to RDS through EC2 via SSM"
+    echo
+    echo "Utility:"
+    echo "  aws-help                 Show this help message"
+    echo
+    echo "Environment Variables:"
+    echo "  AWS_PROFILE              Current AWS profile (managed by aws-profile)"
+    echo "  AWS_RDS_SECRET_ID        Path to RDS credentials in Secrets Manager"
+    echo
+    echo "All commands automatically display the current AWS profile and prompt"
+    echo "you to select one if none is set."
+}
+
 aws-profile() {
     if [ -z "$1" ]; then
         echo "Current profile: ${AWS_PROFILE:-default}"
@@ -8,24 +39,81 @@ aws-profile() {
         aws configure list-profiles
         return
     fi
-    
+
     export AWS_PROFILE=$1
     echo "Switched to AWS profile: $AWS_PROFILE"
 }
 
+_check_aws_profile() {
+    echo "AWS Profile: ${AWS_PROFILE:-<not set>}" >&2
+
+    if [ -z "$AWS_PROFILE" ]; then
+        echo "No AWS profile is currently set." >&2
+        echo "Available profiles:" >&2
+        local profiles=$(aws configure list-profiles 2>/dev/null)
+
+        if [ -z "$profiles" ]; then
+            echo "Error: No AWS profiles found. Please run 'aws configure' to set up a profile." >&2
+            return 1
+        fi
+
+        local counter=1
+        local profile_array=()
+
+        # Build array and display in the same loop to ensure order consistency
+        while IFS= read -r profile; do
+            # Skip empty lines
+            if [ -n "$profile" ]; then
+                profile_array+=("$profile")
+                echo "$counter) $profile" >&2
+                ((counter++))
+            fi
+        done <<< "$profiles"
+
+        echo >&2
+        printf "Select profile number (1-$((counter-1))): " >&2
+        read selection </dev/tty
+
+        if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt $((counter-1)) ]; then
+            echo "Invalid selection." >&2
+            return 1
+        fi
+
+        local selected_profile="${profile_array[$selection]}"
+        export AWS_PROFILE="$selected_profile"
+        echo "Selected AWS profile: $AWS_PROFILE" >&2
+    fi
+
+    echo >&2
+}
+
 aws-rds-info(){
+    _check_aws_profile || return 1
+
+    if [ -z "$AWS_RDS_SECRET_ID" ]; then
+        echo "Error: AWS_RDS_SECRET_ID environment variable is not set."
+        echo "Please set it to your RDS secret path, e.g.:"
+        echo "  export AWS_RDS_SECRET_ID=\"myapp/database/password\""
+        return 1
+    fi
+
+    echo "Using secret: $AWS_RDS_SECRET_ID"
     aws secretsmanager get-secret-value \
-        --secret-id "myapp/database/password" \
+        --secret-id "$AWS_RDS_SECRET_ID" \
         --query SecretString --output text | jq .
 }
 
 aws-ec2-list() {
-    aws ec2 describe-instances \
+    _check_aws_profile || return 1
+
+    AWS_PAGER="" aws ec2 describe-instances \
         --query 'Reservations[*].Instances[*].[InstanceId,Tags[?Key==`Name`].Value|[0],State.Name]' \
         --output table
 }
 
 aws-select-instance() {
+    _check_aws_profile || return 1
+
     local filter_state="${1:-running}"
 
     echo "Fetching $filter_state EC2 instances..." >&2
@@ -77,9 +165,20 @@ aws-db-fwdport() {
 
     # If no RDS host provided, fetch from Secrets Manager
     if [ -z "$rds_host" ]; then
+        _check_aws_profile || return 1
+
+        if [ -z "$AWS_RDS_SECRET_ID" ]; then
+            echo "Error: AWS_RDS_SECRET_ID environment variable is not set."
+            echo "Please set it to your RDS secret path, or provide RDS host manually:"
+            echo "  export AWS_RDS_SECRET_ID=\"myapp/database/password\""
+            echo "  aws-db-fwdport [local-port] <rds-endpoint>"
+            return 1
+        fi
+
         echo "Fetching RDS endpoint from Secrets Manager..."
+        echo "Using secret: $AWS_RDS_SECRET_ID"
         rds_host=$(aws secretsmanager get-secret-value \
-            --secret-id "myapp/database/password" \
+            --secret-id "$AWS_RDS_SECRET_ID" \
             --query SecretString --output text | jq -r '.host // .endpoint // empty')
 
         if [ -z "$rds_host" ] || [ "$rds_host" = "null" ]; then
@@ -111,6 +210,8 @@ aws-db-fwdport() {
 }
 
 aws-ssh() {
+    _check_aws_profile || return 1
+
     local selected_instance=$(aws-select-instance)
     if [ $? -ne 0 ] || [ -z "$selected_instance" ]; then
         return 1
@@ -139,6 +240,8 @@ aws-scp-ssm() {
         echo "  - Transfer direction auto-detected based on path types"
         return 1
     fi
+
+    _check_aws_profile || return 1
 
     local source="$1"
     local destination="$2"
@@ -341,6 +444,8 @@ aws-scp() {
         echo "  - Remote paths must be absolute (start with /)"
         return 1
     fi
+
+    _check_aws_profile || return 1
 
     local source="$1"
     local destination="$2"

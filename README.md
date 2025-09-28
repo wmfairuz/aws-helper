@@ -31,7 +31,9 @@ A collection of bash functions for managing AWS resources, including EC2 instanc
 | `aws-ssh` | SSH into EC2 instance via Session Manager |
 | `aws-scp` | Transfer files to/from EC2 instances via SSH over Session Manager |
 | `aws-scp-ssm` | Transfer files to/from EC2 instances via SSM commands (slower) |
-| `aws-db-fwdport` | Port forward to RDS through EC2 bastion |
+| `aws-db-fwdport` | Port forward to RDS through EC2 instance via SSM |
+
+**Note:** All commands automatically display the current AWS profile and prompt you to select one if none is set.
 
 ---
 
@@ -125,8 +127,11 @@ aws-rds-info
 }
 ```
 
+**Prerequisites:**
+- Set `AWS_RDS_SECRET_ID` environment variable to your secret path
+
 **Notes:**
-- Fetches from secret ID: `myapp/database/password`
+- Fetches from secret ID specified in `AWS_RDS_SECRET_ID` environment variable
 - Returns formatted JSON with database credentials
 
 ---
@@ -298,7 +303,7 @@ aws-scp-ssm /var/log/app.log ./logs/           # Download to relative local path
 
 ### `aws-db-fwdport`
 
-Create a port forwarding tunnel to RDS database through an EC2 bastion host.
+Create a port forwarding tunnel to RDS database through an EC2 instance via AWS Session Manager.
 
 **Usage:**
 ```bash
@@ -339,10 +344,14 @@ aws-db-fwdport 3307 my-rds-cluster.amazonaws.com
 # Port mapping: remote 3306 → local 3307
 ```
 
+**Prerequisites:**
+- Set `AWS_RDS_SECRET_ID` environment variable (for auto-fetch mode)
+- EC2 instance with SSM agent enabled
+
 **Interactive Flow:**
-1. Fetches RDS endpoint from Secrets Manager (if not provided)
-2. Lists running EC2 instances for bastion selection
-3. Establishes port forwarding tunnel
+1. Fetches RDS endpoint from Secrets Manager (if not provided and `AWS_RDS_SECRET_ID` is set)
+2. Lists running EC2 instances for proxy selection
+3. Establishes port forwarding tunnel via AWS Session Manager
 4. Keeps session active until terminated
 
 **Sample Output:**
@@ -374,7 +383,8 @@ mysql -h 127.0.0.1 -P 3307 -u username -p
 
 **Notes:**
 - Remote port is always 3306 (standard MySQL/MariaDB)
-- RDS endpoint auto-fetched from `myapp/database/password` secret
+- Uses AWS Session Manager for secure tunneling (no SSH keys required)
+- RDS endpoint auto-fetched from secret specified in `AWS_RDS_SECRET_ID`
 - Automatically strips port from RDS endpoint if present
 - Session remains active until manually terminated (Ctrl+C)
 
@@ -382,11 +392,25 @@ mysql -h 127.0.0.1 -P 3307 -u username -p
 
 ## Environment Variables
 
-The following environment variables are automatically set:
+### Automatically Set Variables
 
 - `AWS_DEFAULT_REGION`: ap-southeast-5
 - `AWS_REGION`: ap-southeast-5
 - `AWS_PROFILE`: Managed by `aws-profile` function
+
+### Required Configuration Variables
+
+- `AWS_RDS_SECRET_ID`: Path to your RDS credentials in AWS Secrets Manager
+
+**Setup Example:**
+```bash
+# Add to your .bashrc/.zshrc or .aws-config
+export AWS_RDS_SECRET_ID="myapp/database/password"
+```
+
+**Usage:**
+- Used by `aws-rds-info` to fetch RDS credentials
+- Used by `aws-db-fwdport` to auto-fetch RDS endpoint when not specified manually
 
 ## Troubleshooting
 
@@ -398,7 +422,8 @@ The following environment variables are automatically set:
    - Ensure proper IAM permissions for EC2 DescribeInstances
 
 2. **"Could not fetch RDS endpoint from Secrets Manager"**
-   - Verify secret exists: `myapp/database/password`
+   - Set `AWS_RDS_SECRET_ID` environment variable
+   - Verify secret exists at the specified path
    - Check IAM permissions for Secrets Manager
    - Ensure secret contains `host` or `endpoint` field
 

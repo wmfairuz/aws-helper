@@ -20,7 +20,7 @@ The `.aws-config` file provides these key functions:
 - `aws-profile()`: Switch between AWS profiles or list available profiles
 - `aws-rds-info()`: Retrieve RDS database credentials from AWS Secrets Manager
 - `aws-ec2-list()`: List EC2 instances with names and states in table format
-- `aws-db-fwdport()`: Start port forwarding session to RDS through bastion host
+- `aws-db-fwdport()`: Start port forwarding session to RDS through EC2 instance via SSM
 
 ## Usage
 
