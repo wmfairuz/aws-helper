@@ -12,6 +12,9 @@ aws-help() {
     echo "  aws-ec2-list             List all EC2 instances with details"
     echo "  aws-select-instance      Interactively select a running EC2 instance"
     echo "  aws-ssh                  SSH into EC2 instance via Session Manager"
+    echo ""
+    echo "Auto Scaling:"
+    echo "  aws-asg-refresh          Start instance refresh for an Auto Scaling Group"
     echo
     echo "File Transfer:"
     echo "  aws-scp <src> <dest>     Transfer files via SSH over Session Manager (fast)"
@@ -34,7 +37,7 @@ aws-help() {
 
 aws-profile() {
     if [ -z "$1" ]; then
-        echo "Current profile: ${AWS_PROFILE:-default}"
+        echo "Current profile: ${AWS_PROFILE:-<not set>}"
         echo "Available profiles:"
         aws configure list-profiles
         return
@@ -535,5 +538,66 @@ EOF
     else
         echo "Transfer failed."
         return $scp_result
+    fi
+}
+
+aws-asg-refresh() {
+    _check_aws_profile || return 1
+
+    echo "Fetching Auto Scaling Groups..." >&2
+
+    # Get all ASGs
+    local asgs=$(aws autoscaling describe-auto-scaling-groups \
+        --query 'AutoScalingGroups[*].[AutoScalingGroupName,DesiredCapacity,MinSize,MaxSize]' \
+        --output text)
+
+    if [ -z "$asgs" ]; then
+        echo "No Auto Scaling Groups found." >&2
+        return 1
+    fi
+
+    echo "Available Auto Scaling Groups:" >&2
+    echo "=============================" >&2
+
+    local counter=1
+    local asg_names=()
+
+    while IFS=$'\t' read -r asg_name desired min_size max_size; do
+        echo "$counter) $asg_name (Desired: $desired, Min: $min_size, Max: $max_size)" >&2
+        asg_names+=("$asg_name")
+        ((counter++))
+    done <<< "$asgs"
+
+    echo >&2
+    printf "Select ASG number (1-$((counter-1))): " >&2
+    read selection </dev/tty
+
+    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt $((counter-1)) ]; then
+        echo "Invalid selection." >&2
+        return 1
+    fi
+
+    local selected_asg="${asg_names[$selection]}"
+
+    echo "Selected ASG: $selected_asg" >&2
+    echo "Starting instance refresh with MinHealthyPercentage=0, InstanceWarmup=0..." >&2
+    echo "WARNING: This will cause downtime as MinHealthyPercentage=0" >&2
+    echo -n "Continue? (y/N): " >&2
+    read confirm </dev/tty
+
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        echo "Cancelled." >&2
+        return 1
+    fi
+
+    aws autoscaling start-instance-refresh \
+        --auto-scaling-group-name "$selected_asg" \
+        --preferences MinHealthyPercentage=0,InstanceWarmup=0
+
+    if [ $? -eq 0 ]; then
+        echo "Instance refresh started successfully for $selected_asg"
+    else
+        echo "Failed to start instance refresh"
+        return 1
     fi
 }

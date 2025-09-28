@@ -27,6 +27,7 @@ A collection of bash functions for managing AWS resources, including EC2 instanc
 |---------|-------------|
 | `aws-profile` | Switch AWS profiles or list available profiles |
 | `aws-ec2-list` | List all EC2 instances with details |
+| `aws-asg-refresh` | Start instance refresh for an Auto Scaling Group |
 | `aws-rds-info` | Retrieve RDS credentials from Secrets Manager |
 | `aws-ssh` | SSH into EC2 instance via Session Manager |
 | `aws-scp` | Transfer files to/from EC2 instances via SSH over Session Manager |
@@ -95,6 +96,61 @@ aws-ec2-list
 |  i-0123456789abcdef0 |  web-server         |     stopped      |
 +------------------+------------------+------------------+
 ```
+
+---
+
+### `aws-asg-refresh`
+
+Start an instance refresh for an Auto Scaling Group with zero downtime tolerance.
+
+**Usage:**
+```bash
+aws-asg-refresh
+```
+
+**Parameters:**
+None
+
+**Interactive Flow:**
+1. Lists all Auto Scaling Groups with their current capacity settings
+2. Prompts for ASG selection
+3. Shows warning about downtime (MinHealthyPercentage=0)
+4. Asks for confirmation before proceeding
+5. Starts instance refresh with aggressive settings
+
+**Example:**
+```bash
+aws-asg-refresh
+```
+
+**Sample Output:**
+```
+Fetching Auto Scaling Groups...
+Available Auto Scaling Groups:
+=============================
+1) my-app-asg (Desired: 2, Min: 1, Max: 4)
+2) web-server-asg (Desired: 3, Min: 2, Max: 6)
+
+Select ASG number (1-2): 1
+Selected ASG: my-app-asg
+Starting instance refresh with MinHealthyPercentage=0, InstanceWarmup=0...
+WARNING: This will cause downtime as MinHealthyPercentage=0
+Continue? (y/N): y
+{
+    "InstanceRefreshId": "08b91cf7-8fa6-48af-84a1-6d659cae8b7a"
+}
+Instance refresh started successfully for my-app-asg
+```
+
+**Configuration Details:**
+- `MinHealthyPercentage=0`: Allows all instances to be replaced simultaneously (causes downtime)
+- `InstanceWarmup=0`: No warmup period, instances are considered healthy immediately
+
+**Warning:**
+This function uses aggressive settings that **will cause downtime**. Use only when downtime is acceptable, such as during maintenance windows.
+
+**Prerequisites:**
+- IAM permissions for `autoscaling:DescribeAutoScalingGroups` and `autoscaling:StartInstanceRefresh`
 
 ---
 
