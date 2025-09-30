@@ -24,6 +24,9 @@ aws-help() {
     echo "  aws-rds-info             Retrieve RDS credentials from Secrets Manager"
     echo "  aws-db-fwdport [port]    Port forward to RDS through EC2 via SSM"
     echo
+    echo "Logging:"
+    echo "  aws-tail [-f] [-n NUM] [--since TIME]  Tail CloudWatch log streams"
+    echo
     echo "Utility:"
     echo "  aws-help                 Show this help message"
     echo
@@ -599,5 +602,114 @@ aws-asg-refresh() {
     else
         echo "Failed to start instance refresh"
         return 1
+    fi
+}
+
+aws-tail() {
+    _check_aws_profile || return 1
+
+    local follow=false
+    local num_lines=""
+    local since="1h"
+
+    # Parse options
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -f)
+                follow=true
+                shift
+                ;;
+            -n)
+                if [ -z "$2" ] || ! [[ "$2" =~ ^[0-9]+$ ]]; then
+                    echo "Error: -n requires a numeric argument"
+                    return 1
+                fi
+                num_lines="$2"
+                shift 2
+                ;;
+            --since)
+                if [ -z "$2" ]; then
+                    echo "Error: --since requires an argument (e.g., 1h, 30m, 1d)"
+                    return 1
+                fi
+                since="$2"
+                shift 2
+                ;;
+            *)
+                echo "Unknown option: $1"
+                echo "Usage: aws-tail [-f] [-n NUM] [--since TIME]"
+                echo "  --since: Time window (e.g., 1h, 30m, 1d). Default: 1h"
+                return 1
+                ;;
+        esac
+    done
+
+    # Let user select log group interactively
+    echo "Fetching CloudWatch log groups..." >&2
+
+    local log_groups=$(aws logs describe-log-groups \
+        --query 'logGroups[*].logGroupName' \
+        --output text)
+
+    if [ -z "$log_groups" ]; then
+        echo "No log groups found." >&2
+        return 1
+    fi
+
+    echo "Available log groups:" >&2
+    echo "====================" >&2
+
+    # Split by tab - AWS CLI returns tab-separated values on one line
+    # Use printf to convert tabs to newlines, then read into array
+    local log_group_array=()
+    while IFS= read -r group; do
+        [ -n "$group" ] && log_group_array+=("$group")
+    done < <(printf '%s\n' "$log_groups" | tr '\t' '\n')
+
+    # Display numbered list
+    local counter=1
+    for group in "${log_group_array[@]}"; do
+        echo "$counter) $group" >&2
+        ((counter++))
+    done
+
+    echo >&2
+    printf "Select log group number (1-${#log_group_array[@]}): " >&2
+    read selection </dev/tty
+
+    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt ${#log_group_array[@]} ]; then
+        echo "Invalid selection." >&2
+        return 1
+    fi
+
+    # Arrays are 0-indexed in bash, 1-indexed in zsh
+    # Use consistent 0-based indexing
+    if [ -n "$ZSH_VERSION" ]; then
+        log_group="${log_group_array[$selection]}"
+    else
+        log_group="${log_group_array[$((selection-1))]}"
+    fi
+
+    echo "Tailing log group: $log_group"
+    [ "$follow" = true ] && echo "Following logs (press Ctrl+C to stop)..."
+    echo ""
+
+    if [ "$follow" = true ]; then
+        # Follow mode: use tail with --follow
+        aws logs tail "$log_group" \
+            --follow \
+            --format short \
+            --since "$since"
+    else
+        # Static mode: get last N lines using aws logs tail
+        if [ -n "$num_lines" ]; then
+            aws logs tail "$log_group" \
+                --since "$since" \
+                --format short | tail -n "$num_lines"
+        else
+            aws logs tail "$log_group" \
+                --since "$since" \
+                --format short
+        fi
     fi
 }
