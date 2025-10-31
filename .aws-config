@@ -124,10 +124,10 @@ aws-select-instance() {
 
     echo "Fetching $filter_state EC2 instances..." >&2
 
-    # Get instances with their details
+    # Get instances with their details including ASG name
     local instances=$(aws ec2 describe-instances \
         --filters "Name=instance-state-name,Values=$filter_state" \
-        --query 'Reservations[*].Instances[*].[InstanceId,Tags[?Key==`Name`].Value|[0],PrivateIpAddress,PublicIpAddress]' \
+        --query 'Reservations[*].Instances[*].[InstanceId,Tags[?Key==`Name`].Value|[0],PrivateIpAddress,PublicIpAddress,Tags[?Key==`aws:autoscaling:groupName`].Value|[0]]' \
         --output text | grep -v "None\tNone\tNone")
 
     if [ -z "$instances" ]; then
@@ -141,13 +141,22 @@ aws-select-instance() {
     local counter=1
     local instance_ids=()
 
-    while IFS=$'\t' read -r instance_id name private_ip public_ip; do
+    while IFS=$'\t' read -r instance_id name private_ip public_ip asg_name; do
         local display_name="${name:-"(no name)"}"
         local ip_info="Private: $private_ip"
         if [ "$public_ip" != "None" ] && [ -n "$public_ip" ]; then
             ip_info="$ip_info, Public: $public_ip"
         fi
-        echo "$counter) $instance_id - $display_name - $ip_info" >&2
+
+        # Add ASG info if available
+        local asg_info=""
+        if [ "$asg_name" != "None" ] && [ -n "$asg_name" ]; then
+            asg_info=" - ASG: $asg_name"
+        else
+            asg_info=" - (not in ASG)"
+        fi
+
+        echo "$counter) $instance_id - $display_name - $ip_info$asg_info" >&2
         instance_ids+=("$instance_id")
         ((counter++))
     done <<< "$instances"
