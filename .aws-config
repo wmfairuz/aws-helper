@@ -173,38 +173,56 @@ aws-select-instance() {
     echo "${instance_ids[$selection]}"
 }
 
+aws-select-rds() {
+    _check_aws_profile || return 1
+
+    echo "Fetching RDS instances..." >&2
+
+    local instances=$(aws rds describe-db-instances \
+        --query 'DBInstances[*].[DBInstanceIdentifier,Endpoint.Address,DBInstanceStatus,DBInstanceClass]' \
+        --output text)
+
+    if [ -z "$instances" ]; then
+        echo "No RDS instances found." >&2
+        return 1
+    fi
+
+    echo "Available RDS instances:" >&2
+    echo "========================" >&2
+
+    local counter=1
+    local endpoints=()
+
+    while IFS=$'\t' read -r db_id endpoint db_status db_class; do
+        echo "$counter) $db_id - $endpoint ($db_status, $db_class)" >&2
+        endpoints+=("$endpoint")
+        ((counter++))
+    done <<< "$instances"
+
+    echo >&2
+    printf "Select RDS instance number (1-$((counter-1))): " >&2
+    read selection </dev/tty
+
+    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [ "$selection" -lt 1 ] || [ "$selection" -gt $((counter-1)) ]; then
+        echo "Invalid selection." >&2
+        return 1
+    fi
+
+    echo "${endpoints[$selection]}"
+}
+
 aws-db-fwdport() {
     local local_port="${1:-33060}"
     local rds_host="$2"
     local remote_port="3306"
 
-    # If no RDS host provided, fetch from Secrets Manager
     if [ -z "$rds_host" ]; then
         _check_aws_profile || return 1
 
-        if [ -z "$AWS_RDS_SECRET_ID" ]; then
-            echo "Error: AWS_RDS_SECRET_ID environment variable is not set."
-            echo "Please set it to your RDS secret path, or provide RDS host manually:"
-            echo "  export AWS_RDS_SECRET_ID=\"myapp/database/password\""
-            echo "  aws-db-fwdport [local-port] <rds-endpoint>"
+        rds_host=$(aws-select-rds)
+        if [ $? -ne 0 ] || [ -z "$rds_host" ]; then
             return 1
         fi
-
-        echo "Fetching RDS endpoint from Secrets Manager..."
-        echo "Using secret: $AWS_RDS_SECRET_ID"
-        rds_host=$(aws secretsmanager get-secret-value \
-            --secret-id "$AWS_RDS_SECRET_ID" \
-            --query SecretString --output text | jq -r '.host // .endpoint // empty')
-
-        if [ -z "$rds_host" ] || [ "$rds_host" = "null" ]; then
-            echo "Error: Could not fetch RDS endpoint from Secrets Manager."
-            echo "Please provide RDS host manually: aws-db-fwdport [local-port] <rds-endpoint>"
-            return 1
-        fi
-
-        # Remove port if present (e.g., hostname:3306 -> hostname)
-        rds_host="${rds_host%:*}"
-        echo "Found RDS endpoint: $rds_host"
     fi
 
     local selected_instance=$(aws-select-instance)
