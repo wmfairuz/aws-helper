@@ -230,11 +230,8 @@ aws-db-fwdport() {
         return 1
     fi
 
-    echo "Starting port forwarding session..."
-    echo "Instance: $selected_instance"
-    echo "RDS Host: $rds_host"
-    echo "Remote Port: $remote_port -> Local Port: $local_port"
-    echo
+    printf '\n\e[1;30;43m  aws: %s  \e[0m \e[1;37;40m  %s  \e[0m\n' "${AWS_PROFILE:-<not set>}" "$selected_instance"
+    printf '\e[1;30;44m  rds: %s  \e[0m \e[1;37;40m  %s → localhost:%s  \e[0m\n\n' "$rds_host" "$remote_port" "$local_port"
 
     aws ssm start-session \
         --target "$selected_instance" \
@@ -250,7 +247,7 @@ aws-ssh() {
         return 1
     fi
 
-    echo "Connecting to instance: $selected_instance"
+    printf '\n\e[1;30;43m  aws: %s  \e[0m \e[1;37;40m  %s  \e[0m\n\n' "${AWS_PROFILE:-<not set>}" "$selected_instance"
     echo "Starting SSH session via AWS Session Manager..."
 
     aws ssm start-session \
