@@ -19,7 +19,7 @@ A collection of bash functions for managing AWS resources, including EC2 instanc
 - AWS CLI installed and configured
 - AWS Session Manager plugin
 - `jq` command-line JSON processor
-- Appropriate AWS IAM permissions for EC2, SSM, and Secrets Manager
+- Appropriate AWS IAM permissions for EC2, RDS, SSM, and Secrets Manager
 
 ## Quick Command Reference
 
@@ -33,6 +33,7 @@ A collection of bash functions for managing AWS resources, including EC2 instanc
 | `aws-scp` | Transfer files to/from EC2 instances via SSH over Session Manager |
 | `aws-scp-ssm` | Transfer files to/from EC2 instances via SSM commands (slower) |
 | `aws-db-fwdport` | Port forward to RDS through EC2 instance via SSM |
+| `aws-tail` | Tail CloudWatch log streams |
 
 **Note:** All commands automatically display the current AWS profile and prompt you to select one if none is set.
 
@@ -57,16 +58,9 @@ aws-profile [profile-name]
 # Show current profile and list available profiles
 aws-profile
 
-# Switch to production profile
+# Switch to a named profile
 aws-profile prod
-
-# Switch to development profile
-aws-profile dev
 ```
-
-**Output:**
-- Without parameters: Shows current profile and lists all available profiles
-- With profile name: Switches to specified profile and confirms the change
 
 ---
 
@@ -79,194 +73,103 @@ Display all EC2 instances in a formatted table showing instance IDs, names, and 
 aws-ec2-list
 ```
 
-**Parameters:**
-None
-
-**Example:**
-```bash
-aws-ec2-list
-```
-
-**Output:**
+**Sample Output:**
 ```
 ---------------------------------------------------------------------------
-|                           DescribeInstances                            |
-+------------------+------------------+------------------+
-|  i-0123456789abcdef0 |  my-app-server |     running      |
-|  i-0123456789abcdef0 |  web-server         |     stopped      |
-+------------------+------------------+------------------+
+|                           DescribeInstances                             |
++----------------------+------------------+----------+
+|  i-0123456789abcdef0 |  my-app-server   | running  |
+|  i-0abcdef123456789  |  web-server      | stopped  |
++----------------------+------------------+----------+
 ```
 
 ---
 
 ### `aws-asg-refresh`
 
-Start an instance refresh for an Auto Scaling Group with zero downtime tolerance.
+Start an instance refresh for an Auto Scaling Group.
 
 **Usage:**
 ```bash
 aws-asg-refresh
 ```
 
-**Parameters:**
-None
-
 **Interactive Flow:**
-1. Lists all Auto Scaling Groups with their current capacity settings
+1. Lists all Auto Scaling Groups with capacity settings
 2. Prompts for ASG selection
-3. Shows warning about downtime (MinHealthyPercentage=0)
+3. Shows downtime warning (`MinHealthyPercentage=0`)
 4. Asks for confirmation before proceeding
-5. Starts instance refresh with aggressive settings
 
-**Example:**
-```bash
-aws-asg-refresh
-```
-
-**Sample Output:**
-```
-Fetching Auto Scaling Groups...
-Available Auto Scaling Groups:
-=============================
-1) my-app-asg (Desired: 2, Min: 1, Max: 4)
-2) web-server-asg (Desired: 3, Min: 2, Max: 6)
-
-Select ASG number (1-2): 1
-Selected ASG: my-app-asg
-Starting instance refresh with MinHealthyPercentage=0, InstanceWarmup=0...
-WARNING: This will cause downtime as MinHealthyPercentage=0
-Continue? (y/N): y
-{
-    "InstanceRefreshId": "08b91cf7-8fa6-48af-84a1-6d659cae8b7a"
-}
-Instance refresh started successfully for my-app-asg
-```
-
-**Configuration Details:**
-- `MinHealthyPercentage=0`: Allows all instances to be replaced simultaneously (causes downtime)
-- `InstanceWarmup=0`: No warmup period, instances are considered healthy immediately
-
-**Warning:**
-This function uses aggressive settings that **will cause downtime**. Use only when downtime is acceptable, such as during maintenance windows.
-
-**Prerequisites:**
-- IAM permissions for `autoscaling:DescribeAutoScalingGroups` and `autoscaling:StartInstanceRefresh`
+**Warning:** This uses aggressive settings (`MinHealthyPercentage=0`, `InstanceWarmup=0`) that **will cause downtime**. Use only during maintenance windows.
 
 ---
 
 ### `aws-rds-info`
 
-Retrieve RDS database connection information from AWS Secrets Manager.
+Retrieve RDS database connection credentials from AWS Secrets Manager.
 
 **Usage:**
 ```bash
 aws-rds-info
 ```
 
-**Parameters:**
-None
+**Prerequisites:**
+- `AWS_RDS_SECRET_ID` environment variable must be set
 
 **Example:**
 ```bash
+export AWS_RDS_SECRET_ID="myapp/database/password"
 aws-rds-info
 ```
 
-**Output:**
+**Sample Output:**
 ```json
 {
   "username": "admin",
   "password": "secret123",
   "engine": "mysql",
-  "host": "my-rds-cluster.cj0example123.ap-southeast-5.rds.amazonaws.com",
+  "host": "my-rds.cluster-xyz.ap-southeast-5.rds.amazonaws.com",
   "port": 3306,
   "dbname": "production"
 }
 ```
 
-**Prerequisites:**
-- Set `AWS_RDS_SECRET_ID` environment variable to your secret path
-
-**Notes:**
-- Fetches from secret ID specified in `AWS_RDS_SECRET_ID` environment variable
-- Returns formatted JSON with database credentials
-
 ---
 
 ### `aws-ssh`
 
-Connect to EC2 instances via SSH using AWS Session Manager.
+Connect to an EC2 instance via SSH using AWS Session Manager (no public IP or SSH key required).
 
 **Usage:**
 ```bash
 aws-ssh
 ```
 
-**Parameters:**
-None
-
 **Interactive Flow:**
 1. Lists all running EC2 instances
 2. Prompts for instance selection
-3. Establishes SSH connection via Session Manager
-
-**Example:**
-```bash
-aws-ssh
-```
+3. Establishes SSH session via Session Manager
 
 **Sample Output:**
 ```
+AWS Profile: my-profile
+
 Fetching running EC2 instances...
 Available running EC2 instances:
 =====================================
-1) i-0123456789abcdef0 - my-app-server - Private: 10.0.10.46
+1) i-0123456789abcdef0 - my-app-server - Private: 10.0.10.46 - ASG: my-app-asg
+2) i-0abcdef123456789  - web-server    - Private: 10.0.10.52 - (not in ASG)
 
-Select instance number (1-1): 1
+Select instance number (1-2): 1
 Connecting to instance: i-0123456789abcdef0
 Starting SSH session via AWS Session Manager...
 ```
-
-**Benefits:**
-- Works through private networks (no public IP required)
-- Uses IAM permissions instead of SSH keys
-- Auditable through CloudTrail
 
 ---
 
 ### `aws-scp`
 
-Transfer files to and from EC2 instances using SSH over Session Manager (recommended method).
-
-**Prerequisites:**
-Before using this function, you need to set up SSH key access on your EC2 instances:
-
-1. **Connect to instance via Session Manager:**
-   ```bash
-   aws-ssh  # Use our helper to connect
-   ```
-
-2. **Switch to the ubuntu/ec2-user account:**
-   ```bash
-   sudo su - ubuntu  # or ec2-user depending on AMI
-   ```
-
-3. **Add your SSH public key:**
-   ```bash
-   mkdir -p ~/.ssh
-   echo "your-ssh-public-key-here" >> ~/.ssh/authorized_keys
-   chmod 600 ~/.ssh/authorized_keys
-   chmod 700 ~/.ssh
-   ```
-
-4. **Optional: Configure your local SSH config (permanent setup):**
-   Add this to your `~/.ssh/config`:
-   ```
-   Host i-* mi-*
-       ProxyCommand sh -c "aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters 'portNumber=%p'"
-       User ubuntu
-       StrictHostKeyChecking no
-       UserKnownHostsFile /dev/null
-   ```
+Transfer files to/from EC2 instances using SSH over Session Manager (recommended).
 
 **Usage:**
 ```bash
@@ -274,92 +177,45 @@ aws-scp <source> <destination> [username]
 ```
 
 **Parameters:**
-- `source`: Local or remote file path (relative/absolute for local, absolute for remote)
-- `destination`: Local or remote file path (relative/absolute for local, absolute for remote)
+- `source`: Source path (relative/absolute local, or absolute remote)
+- `destination`: Destination path (relative/absolute local, or absolute remote)
 - `username`: SSH username (optional, defaults to `ubuntu`)
 
+**Direction detection:**
+- Local → remote: local path is relative, remote path is absolute (`/`)
+- Remote → local: remote path is absolute (`/`), local path is relative
+
 **Examples:**
-
-**Upload files:**
 ```bash
-aws-scp ./config.json /opt/app/config/         # Upload relative local file
-aws-scp /home/user/file.txt /home/ubuntu/      # Upload absolute local file
-aws-scp ./archive.tar.gz /tmp/                 # Upload to /tmp/archive.tar.gz
+aws-scp ./config.json /opt/app/config/       # Upload
+aws-scp /var/log/app.log ./logs/             # Download
+aws-scp ./file.txt /home/ec2-user/ ec2-user  # Custom username
 ```
 
-**Download files:**
-```bash
-aws-scp /var/log/app.log ./logs/               # Download to relative local path
-aws-scp /etc/nginx/nginx.conf /home/user/      # Download to absolute local path
-```
-
-**Custom username:**
-```bash
-aws-scp ./file.txt /home/ec2-user/ ec2-user    # Use ec2-user instead of ubuntu
-```
-
-**Sample Output:**
-```bash
-$ aws-scp ./deploy.sh /home/ubuntu/
-Fetching running EC2 instances...
-Available running EC2 instances:
-=====================================
-1) i-0123456789abcdef0 - my-app-server - Private: 10.0.10.46
-
-Select instance number (1-1): 1
-Selected instance: i-0123456789abcdef0
-Using SSH user: ubuntu
-
-Setting up SSH proxy via Session Manager...
-Uploading /Users/user/deploy.sh to i-0123456789abcdef0:/home/ubuntu/deploy.sh
-deploy.sh                    100%  1247    15.2KB/s   00:00
-Transfer completed successfully.
-```
-
-**Benefits:**
-- **Fast transfers** - uses native SCP over SSH tunnel
-- **Supports large files** - no encoding overhead
-- **Works with directories** - `scp -r` functionality
-- **Progress indication** - shows transfer speed and progress
-- **Auto-cleanup** - temporary SSH config is cleaned up automatically
-
-**Tips:**
-- For large files, compress first: `tar czf archive.tar.gz folder/ && aws-scp archive.tar.gz /tmp/`
-- Transfer is slow over Session Manager, so compress when possible
-- SSH key setup is one-time per instance
+**Prerequisites:**
+- SSH public key added to the instance's `~/.ssh/authorized_keys`
 
 ---
 
 ### `aws-scp-ssm`
 
-Transfer files to and from EC2 instances using SSM commands (fallback method when SSH keys are not available).
+Transfer files to/from EC2 instances using SSM commands. Fallback when SSH keys are unavailable.
 
 **Usage:**
 ```bash
 aws-scp-ssm <source> <destination>
 ```
 
-**Parameters:**
-- `source`: Local or remote file path (relative/absolute for local, absolute for remote)
-- `destination`: Local or remote file path (relative/absolute for local, absolute for remote)
-
-**Examples:**
-```bash
-aws-scp-ssm ./config.json /opt/app/config/     # Upload relative local file
-aws-scp-ssm /var/log/app.log ./logs/           # Download to relative local path
-```
-
 **Notes:**
-- **Slower than aws-scp** - uses base64 encoding through SSM commands
-- **No SSH keys required** - works with just SSM permissions
-- **Limited file size** - may fail with very large files due to SSM command limits
-- **Use aws-scp instead** when SSH keys are available
+- Slower than `aws-scp` — uses base64 encoding through SSM
+- No SSH keys required
+- May struggle with very large files due to SSM command output limits
 
 ---
 
 ### `aws-db-fwdport`
 
-Create a port forwarding tunnel to RDS database through an EC2 instance via AWS Session Manager.
+Create a port forwarding tunnel to an RDS database through an EC2 instance via AWS Session Manager.
 
 **Usage:**
 ```bash
@@ -367,143 +223,131 @@ aws-db-fwdport [local-port] [rds-endpoint]
 ```
 
 **Parameters:**
-- `local-port` (optional): Local port to bind to (default: 33060)
-- `rds-endpoint` (optional): RDS endpoint hostname (auto-fetched if not provided)
-
-**Examples:**
-
-**Auto-fetch RDS endpoint with default local port:**
-```bash
-aws-db-fwdport
-# Connects to: auto-fetched RDS endpoint
-# Port mapping: remote 3306 → local 33060
-```
-
-**Auto-fetch RDS endpoint with custom local port:**
-```bash
-aws-db-fwdport 3307
-# Connects to: auto-fetched RDS endpoint
-# Port mapping: remote 3306 → local 3307
-```
-
-**Manual RDS endpoint with default local port:**
-```bash
-aws-db-fwdport "" my-rds-cluster.amazonaws.com
-# Connects to: my-rds-cluster.amazonaws.com
-# Port mapping: remote 3306 → local 33060
-```
-
-**Manual RDS endpoint with custom local port:**
-```bash
-aws-db-fwdport 3307 my-rds-cluster.amazonaws.com
-# Connects to: my-rds-cluster.amazonaws.com
-# Port mapping: remote 3306 → local 3307
-```
-
-**Prerequisites:**
-- Set `AWS_RDS_SECRET_ID` environment variable (for auto-fetch mode)
-- EC2 instance with SSM agent enabled
+- `local-port` (optional): Local port to bind (default: `33060`)
+- `rds-endpoint` (optional): RDS hostname. If omitted, you'll be prompted to select from available RDS instances.
 
 **Interactive Flow:**
-1. Fetches RDS endpoint from Secrets Manager (if not provided and `AWS_RDS_SECRET_ID` is set)
-2. Lists running EC2 instances for proxy selection
-3. Establishes port forwarding tunnel via AWS Session Manager
-4. Keeps session active until terminated
+1. If no endpoint given — lists available RDS instances and prompts for selection
+2. Lists running EC2 instances and prompts for selection (used as the SSM tunnel proxy)
+3. Starts port forwarding session
+
+**Examples:**
+```bash
+# Interactive: pick RDS instance and EC2 proxy, use default local port 33060
+aws-db-fwdport
+
+# Interactive RDS selection, custom local port
+aws-db-fwdport 3307
+
+# Explicit RDS endpoint, default local port
+aws-db-fwdport "" my-rds.cluster-xyz.ap-southeast-5.rds.amazonaws.com
+
+# Fully explicit
+aws-db-fwdport 3307 my-rds.cluster-xyz.ap-southeast-5.rds.amazonaws.com
+```
 
 **Sample Output:**
-```bash
-$ aws-db-fwdport 3307
-Fetching RDS endpoint from Secrets Manager...
-Found RDS endpoint: my-rds-cluster.cj0example123.ap-southeast-5.rds.amazonaws.com
+```
+AWS Profile: my-profile
+
+Fetching RDS instances...
+Available RDS instances:
+========================
+1) my-app-db   - my-app-db.cluster-xyz.ap-southeast-5.rds.amazonaws.com (available, db.t3.medium)
+2) my-app-db-2 - my-app-db-2.cluster-abc.ap-southeast-5.rds.amazonaws.com (available, db.t3.medium)
+
+Select RDS instance number (1-2): 1
+
 Fetching running EC2 instances...
 Available running EC2 instances:
 =====================================
-1) i-0123456789abcdef0 - my-app-server - Private: 10.0.10.46
+1) i-0123456789abcdef0 - my-app-server - Private: 10.0.10.46 - ASG: my-app-asg
 
 Select instance number (1-1): 1
 Starting port forwarding session...
 Instance: i-0123456789abcdef0
-RDS Host: my-rds-cluster.cj0example123.ap-southeast-5.rds.amazonaws.com
-Remote Port: 3306 -> Local Port: 3307
+RDS Host: my-app-db.cluster-xyz.ap-southeast-5.rds.amazonaws.com
+Remote Port: 3306 -> Local Port: 33060
 
 Starting session with SessionId: botocore-session-123456789
-Port 3307 opened for sessionId botocore-session-123456789.
+Port 33060 opened for sessionId botocore-session-123456789.
 Waiting for connections...
 ```
 
-**Usage After Port Forwarding:**
-Once the tunnel is established, connect to your database using:
+**Connect after tunnel is up:**
 ```bash
-mysql -h 127.0.0.1 -P 3307 -u username -p
+mysql -h 127.0.0.1 -P 33060 -u admin -p
 ```
 
 **Notes:**
-- Remote port is always 3306 (standard MySQL/MariaDB)
-- Uses AWS Session Manager for secure tunneling (no SSH keys required)
-- RDS endpoint auto-fetched from secret specified in `AWS_RDS_SECRET_ID`
-- Automatically strips port from RDS endpoint if present
-- Session remains active until manually terminated (Ctrl+C)
+- Remote port is always 3306 (MySQL/MariaDB)
+- Session stays active until you press `Ctrl+C`
+
+---
+
+### `aws-tail`
+
+Tail CloudWatch log streams interactively.
+
+**Usage:**
+```bash
+aws-tail [-f] [-n NUM] [--since TIME]
+```
+
+**Options:**
+- `-f`: Follow mode — stream new log events in real time
+- `-n NUM`: Limit output to last N lines (static mode only)
+- `--since TIME`: How far back to look (default: `1h`). Examples: `30m`, `2h`, `1d`
+
+**Interactive Flow:**
+1. Lists available CloudWatch log groups
+2. Prompts for selection
+3. Streams or displays logs
+
+**Examples:**
+```bash
+aws-tail                        # Last 1h of logs from selected group
+aws-tail -f                     # Follow logs in real time
+aws-tail -n 50                  # Last 50 lines
+aws-tail -f --since 30m         # Follow from 30 minutes ago
+```
 
 ---
 
 ## Environment Variables
 
-### Automatically Set Variables
+| Variable | Description |
+|----------|-------------|
+| `AWS_DEFAULT_REGION` | Set to `ap-southeast-5` (auto-exported) |
+| `AWS_REGION` | Set to `ap-southeast-5` (auto-exported) |
+| `AWS_PROFILE` | Current profile, managed by `aws-profile` |
+| `AWS_RDS_SECRET_ID` | Secrets Manager path for RDS credentials (used by `aws-rds-info`) |
 
-- `AWS_DEFAULT_REGION`: ap-southeast-5
-- `AWS_REGION`: ap-southeast-5
-- `AWS_PROFILE`: Managed by `aws-profile` function
-
-### Required Configuration Variables
-
-- `AWS_RDS_SECRET_ID`: Path to your RDS credentials in AWS Secrets Manager
-
-**Setup Example:**
-```bash
-# Add to your .bashrc/.zshrc or .aws-config
-export AWS_RDS_SECRET_ID="myapp/database/password"
-```
-
-**Usage:**
-- Used by `aws-rds-info` to fetch RDS credentials
-- Used by `aws-db-fwdport` to auto-fetch RDS endpoint when not specified manually
+---
 
 ## Troubleshooting
 
-**Common Issues:**
+**"No running EC2 instances found"**
+- Verify the correct AWS profile/region is active
+- Check IAM permissions for `ec2:DescribeInstances`
 
-1. **"No running EC2 instances found"**
-   - Check AWS profile and region settings
-   - Verify EC2 instances are in running state
-   - Ensure proper IAM permissions for EC2 DescribeInstances
+**"No RDS instances found"**
+- Check IAM permissions for `rds:DescribeDBInstances`
+- Verify instances exist in the current region/profile
 
-2. **"Could not fetch RDS endpoint from Secrets Manager"**
-   - Set `AWS_RDS_SECRET_ID` environment variable
-   - Verify secret exists at the specified path
-   - Check IAM permissions for Secrets Manager
-   - Ensure secret contains `host` or `endpoint` field
+**Session Manager connection fails**
+- Install the [AWS Session Manager plugin](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+- Ensure the EC2 instance has the SSM agent running
+- Check the instance's IAM role allows SSM access
 
-3. **Session Manager connection fails**
-   - Install AWS Session Manager plugin
-   - Verify EC2 instance has SSM agent installed and running
-   - Check IAM roles allow SSM access
+**Port forwarding "no such host" error**
+- Verify VPC connectivity between the EC2 instance and RDS
+- Try specifying the RDS endpoint manually
 
-4. **Port forwarding "no such host" error**
-   - Usually indicates RDS endpoint parsing issue
-   - Try specifying RDS endpoint manually
-   - Check VPC connectivity between EC2 and RDS
-
-**Debug Commands:**
+**Debug commands:**
 ```bash
-# Check AWS configuration
-aws configure list
-
-# Test AWS connectivity
-aws sts get-caller-identity
-
-# Verify Session Manager plugin
-session-manager-plugin
-
-# Check EC2 SSM connectivity
-aws ssm describe-instance-information
+aws configure list              # Check current config
+aws sts get-caller-identity     # Test credentials
+session-manager-plugin          # Verify SSM plugin installed
+aws ssm describe-instance-information  # Check SSM-connected instances
 ```

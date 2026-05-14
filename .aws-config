@@ -216,9 +216,9 @@ aws-db-fwdport() {
     local rds_host="$2"
     local remote_port="3306"
 
-    if [ -z "$rds_host" ]; then
-        _check_aws_profile || return 1
+    _check_aws_profile || return 1
 
+    if [ -z "$rds_host" ]; then
         rds_host=$(aws-select-rds)
         if [ $? -ne 0 ] || [ -z "$rds_host" ]; then
             return 1
